@@ -94,3 +94,29 @@ worry about the discount rule (it's enforced server-side).
 | Sales, inventory, accounting (own P&L) | Earn/redeem math + the ledger |
 
 The POS never stores points or the master customer list — it asks Rewards, in realtime.
+
+## Build it "ready to flip on" (important)
+Build the loyalty integration **now** against this contract, but wire the connection
+as **config** so activating it later is just setting env vars — no code change.
+
+**Config (env vars, on the POS backend — supplied at deploy time):**
+```
+REWARDS_ENABLED=false          # flip to true when the Rewards service is live
+REWARDS_HOST=                  # e.g. https://rewards.balceaquafinity.com
+REWARDS_KEY=                   # this shop's secret key, e.g. sk_liham_…
+```
+
+**Isolate every Rewards call behind ONE backend module** — e.g. `rewardsClient` with
+`lookup(phone)`, `enroll(phone, name)`, `earn(memberId, {...})`, `redeem(memberId, {...})`.
+The rest of the POS only calls those functions; nothing else knows the API shape. The
+secret key lives only in that module, on the backend — never sent to the tablet/frontend.
+
+**Graceful degradation:** if `REWARDS_ENABLED` is false or `REWARDS_HOST` is unreachable,
+the POS still rings up sales normally — it just skips the loyalty step. So you can build
+and even ship the POS *before* Rewards is deployed.
+
+**Activation checklist (when Rewards is deployed):**
+1. Deploy the Rewards service, seed it, copy this shop's `sk_…` key.
+2. In the POS backend `.env`: set `REWARDS_HOST`, `REWARDS_KEY`, `REWARDS_ENABLED=true`.
+3. Restart the POS backend. Loyalty is live — **no code change.**
+
