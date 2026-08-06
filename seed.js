@@ -2,6 +2,7 @@
  * Seed two mock shops (WATER + LIHAM) with their own config + an API key.
  * Prints the raw keys as JSON and writes keys.json (raw keys are shown once).
  */
+try { require('dotenv').config(); } catch { /* dotenv optional */ }
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');

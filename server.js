@@ -5,8 +5,10 @@
  * per-customer balance. Node/Express + Postgres, to match the POS stack.
  *
  * Run:  PGDATABASE=balce_rewards_proto PORT=5055 node server.js
- * DB creds come from PG* env (PGHOST/PGUSER/PGPASSWORD/PGDATABASE).
+ * DB creds come from PG* env (PGHOST/PGUSER/PGPASSWORD/PGDATABASE), loaded
+ * from a .env file if present.
  */
+try { require('dotenv').config(); } catch { /* dotenv optional */ }
 const express = require('express');
 const crypto = require('crypto');
 const { Pool } = require('pg');
