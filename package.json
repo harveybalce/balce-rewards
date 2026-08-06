@@ -1,0 +1,16 @@
+{
+  "name": "balce-rewards",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Balce Rewards — central shared-wallet loyalty service (/v1). Prototype.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "seed": "node seed.js",
+    "demo": "node demo.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.11.5"
+  }
+}
