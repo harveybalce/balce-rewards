@@ -87,6 +87,36 @@ app.post('/v1/members', auth, async (req, res) => {
   res.status(201).json(memberView(ins.rows[0]));
 });
 
+// ── Update member profile ─────────────────────────────────────────────
+app.patch('/v1/members/:id', auth, async (req, res) => {
+  const b = req.body || {};
+  const m = await memberById(req.params.id);
+  if (!m) return res.status(404).json({ error: 'member_not_found', message: 'Member not found' });
+  const s = (v, cur) => (v !== undefined ? ((typeof v === 'string' ? v.trim() : v) || null) : cur);
+  const first = s(b.first_name, m.first_name);
+  const last = s(b.last_name, m.last_name);
+  const name = [first, last].filter(Boolean).join(' ') || m.name;
+  let phone = m.phone;
+  if (b.phone !== undefined) {
+    phone = digits(b.phone) || null;
+    if (phone && phone !== m.phone) {
+      const dup = await pool.query('SELECT 1 FROM loyalty_members WHERE phone=$1 AND id<>$2', [phone, m.id]);
+      if (dup.rows.length) return res.status(409).json({ error: 'phone_taken', message: 'Another member uses that phone' });
+    }
+  }
+  const a = b.address;
+  const addr = a !== undefined
+    ? { street: s(a.street), region: s(a.region), province: s(a.province), city: s(a.city), barangay: s(a.barangay) }
+    : { street: m.address_street, region: m.address_region, province: m.address_province, city: m.address_city, barangay: m.address_barangay };
+  const upd = await pool.query(
+    `UPDATE loyalty_members SET name=$1, first_name=$2, last_name=$3, phone=$4, nickname=$5, email=$6,
+       address_street=$7, address_region=$8, address_province=$9, address_city=$10, address_barangay=$11
+     WHERE id=$12 RETURNING *`,
+    [name, first, last, phone, s(b.nickname, m.nickname), s(b.email, m.email),
+     addr.street, addr.region, addr.province, addr.city, addr.barangay, m.id]);
+  res.json(memberView(upd.rows[0]));
+});
+
 // ── Lookup / balance (reveal-on-presentation) ─────────────────────────
 app.get('/v1/members/lookup', auth, async (req, res) => {
   const r = await pool.query('SELECT * FROM loyalty_members WHERE phone = $1', [digits(req.query.phone)]);
