@@ -47,8 +47,11 @@ const memberView = (m) => ({
   id: m.id, member_code: m.member_code, phone: m.phone, name: m.name,
   first_name: m.first_name, last_name: m.last_name, nickname: m.nickname, email: m.email,
   address: {
-    street: m.address_street, region: m.address_region, province: m.address_province,
-    city: m.address_city, barangay: m.address_barangay,
+    street: m.address_street,
+    region: m.address_region, regionCode: m.address_region_code,
+    province: m.address_province, provinceCode: m.address_province_code,
+    city: m.address_city, cityCode: m.address_city_code,
+    barangay: m.address_barangay, barangayCode: m.address_barangay_code,
   },
   points_balance: Number(m.points_balance), tier: m.tier,
 });
@@ -80,10 +83,12 @@ app.post('/v1/members', auth, async (req, res) => {
   const ins = await pool.query(
     `INSERT INTO loyalty_members
        (member_code, phone, name, first_name, last_name, nickname, email,
-        address_street, address_region, address_province, address_city, address_barangay, enrolled_shop_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+        address_street, address_region, address_province, address_city, address_barangay,
+        address_region_code, address_province_code, address_city_code, address_barangay_code, enrolled_shop_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
     [code, phone || null, name, first || null, last || null, s(b.nickname), s(b.email),
-     s(addr.street), s(addr.region), s(addr.province), s(addr.city), s(addr.barangay), req.shop.shop_id]);
+     s(addr.street), s(addr.region), s(addr.province), s(addr.city), s(addr.barangay),
+     s(addr.regionCode), s(addr.provinceCode), s(addr.cityCode), s(addr.barangayCode), req.shop.shop_id]);
   res.status(201).json(memberView(ins.rows[0]));
 });
 
@@ -105,15 +110,24 @@ app.patch('/v1/members/:id', auth, async (req, res) => {
     }
   }
   const a = b.address;
+  const t = (v) => ((typeof v === 'string' ? v.trim() : '') || null);
   const addr = a !== undefined
-    ? { street: s(a.street), region: s(a.region), province: s(a.province), city: s(a.city), barangay: s(a.barangay) }
-    : { street: m.address_street, region: m.address_region, province: m.address_province, city: m.address_city, barangay: m.address_barangay };
+    ? {
+        street: t(a.street), region: t(a.region), province: t(a.province), city: t(a.city), barangay: t(a.barangay),
+        regionCode: t(a.regionCode), provinceCode: t(a.provinceCode), cityCode: t(a.cityCode), barangayCode: t(a.barangayCode),
+      }
+    : {
+        street: m.address_street, region: m.address_region, province: m.address_province, city: m.address_city, barangay: m.address_barangay,
+        regionCode: m.address_region_code, provinceCode: m.address_province_code, cityCode: m.address_city_code, barangayCode: m.address_barangay_code,
+      };
   const upd = await pool.query(
     `UPDATE loyalty_members SET name=$1, first_name=$2, last_name=$3, phone=$4, nickname=$5, email=$6,
-       address_street=$7, address_region=$8, address_province=$9, address_city=$10, address_barangay=$11
-     WHERE id=$12 RETURNING *`,
+       address_street=$7, address_region=$8, address_province=$9, address_city=$10, address_barangay=$11,
+       address_region_code=$12, address_province_code=$13, address_city_code=$14, address_barangay_code=$15
+     WHERE id=$16 RETURNING *`,
     [name, first, last, phone, s(b.nickname, m.nickname), s(b.email, m.email),
-     addr.street, addr.region, addr.province, addr.city, addr.barangay, m.id]);
+     addr.street, addr.region, addr.province, addr.city, addr.barangay,
+     addr.regionCode, addr.provinceCode, addr.cityCode, addr.barangayCode, m.id]);
   res.json(memberView(upd.rows[0]));
 });
 
