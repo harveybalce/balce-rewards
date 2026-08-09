@@ -79,7 +79,7 @@ app.post('/v1/members', auth, async (req, res) => {
     }
   }
   const seq = await pool.query("SELECT nextval('member_code_seq') AS n");
-  const code = 'BR-' + String(seq.rows[0].n).padStart(6, '0');
+  const code = 'BR-' + String(seq.rows[0].n).padStart(5, '0');
   const ins = await pool.query(
     `INSERT INTO loyalty_members
        (member_code, phone, name, first_name, last_name, nickname, email,

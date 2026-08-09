@@ -73,4 +73,4 @@ CREATE TABLE loyalty_ledger (
 CREATE UNIQUE INDEX ON loyalty_ledger (shop_id, idempotency_key)
   WHERE idempotency_key IS NOT NULL;
 
-CREATE SEQUENCE member_code_seq START 1;
+CREATE SEQUENCE member_code_seq START 21001;
