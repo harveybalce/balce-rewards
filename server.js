@@ -45,6 +45,11 @@ async function shopCfg(shopId) {
 }
 const memberView = (m) => ({
   id: m.id, member_code: m.member_code, phone: m.phone, name: m.name,
+  first_name: m.first_name, last_name: m.last_name, nickname: m.nickname, email: m.email,
+  address: {
+    street: m.address_street, region: m.address_region, province: m.address_province,
+    city: m.address_city, barangay: m.address_barangay,
+  },
   points_balance: Number(m.points_balance), tier: m.tier,
 });
 async function memberById(id) {
@@ -56,18 +61,29 @@ app.get('/health', (_req, res) => res.json({ ok: true, service: 'balce-rewards' 
 
 // ── Enroll — create-or-return (realtime dedup) ────────────────────────
 app.post('/v1/members', auth, async (req, res) => {
-  const phone = digits((req.body || {}).phone);
-  const name = (req.body || {}).name || null;
-  if (!phone) return res.status(400).json({ error: 'phone_required', message: 'phone is required' });
-  const existing = await pool.query('SELECT * FROM loyalty_members WHERE phone = $1', [phone]);
-  if (existing.rows.length) {                                   // already a member anywhere → return them
-    return res.status(200).json({ ...memberView(existing.rows[0]), already_existed: true });
+  const b = req.body || {};
+  const phone = digits(b.phone); // optional now — '' if none
+  const first = (b.first_name || '').trim();
+  const last = (b.last_name || '').trim();
+  const name = (b.name || [first, last].filter(Boolean).join(' ')).trim() || null;
+  if (!name) return res.status(400).json({ error: 'name_required', message: 'first and last name (or name) required' });
+  const addr = b.address || {};
+  const s = (v) => (typeof v === 'string' ? v.trim() : '') || null;
+  if (phone) {                                                  // create-or-return by phone
+    const existing = await pool.query('SELECT * FROM loyalty_members WHERE phone = $1', [phone]);
+    if (existing.rows.length) {
+      return res.status(200).json({ ...memberView(existing.rows[0]), already_existed: true });
+    }
   }
   const seq = await pool.query("SELECT nextval('member_code_seq') AS n");
   const code = 'BR-' + String(seq.rows[0].n).padStart(6, '0');
   const ins = await pool.query(
-    `INSERT INTO loyalty_members (member_code, phone, name, enrolled_shop_id)
-     VALUES ($1,$2,$3,$4) RETURNING *`, [code, phone, name, req.shop.shop_id]);
+    `INSERT INTO loyalty_members
+       (member_code, phone, name, first_name, last_name, nickname, email,
+        address_street, address_region, address_province, address_city, address_barangay, enrolled_shop_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+    [code, phone || null, name, first || null, last || null, s(b.nickname), s(b.email),
+     s(addr.street), s(addr.region), s(addr.province), s(addr.city), s(addr.barangay), req.shop.shop_id]);
   res.status(201).json(memberView(ins.rows[0]));
 });
 

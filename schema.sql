@@ -34,13 +34,24 @@ CREATE TABLE shop_loyalty_config (
 CREATE TABLE loyalty_members (
   id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   member_code      text UNIQUE NOT NULL,          -- BR-000123
-  phone            text UNIQUE NOT NULL,          -- one phone = one member
-  name             text,
+  phone            text,                          -- optional; unique when present
+  name             text,                          -- display name (first + last)
+  first_name       text,
+  last_name        text,
+  nickname         text,                          -- what staff call them
+  email            text,
+  address_street   text,
+  address_region   text,
+  address_province text,
+  address_city     text,
+  address_barangay text,
   enrolled_shop_id uuid REFERENCES shops(id),     -- reporting only
   points_balance   numeric NOT NULL DEFAULT 0,
   tier             text NOT NULL DEFAULT 'regular',
   created_at       timestamptz NOT NULL DEFAULT now()
 );
+-- One phone = one member, but phone is optional (walk-ins without one).
+CREATE UNIQUE INDEX loyalty_members_phone_uniq ON loyalty_members (phone) WHERE phone IS NOT NULL;
 
 -- Append-only truth. Every balance change writes a row, tagged by shop.
 CREATE TABLE loyalty_ledger (
