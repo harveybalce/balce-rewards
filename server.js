@@ -35,13 +35,33 @@ async function auth(req, res, next) {
   next();
 }
 
-const cfgCache = new Map();
+const cfgCache = new Map();          // shopId -> { c, at } — 60s TTL so owner
+const CFG_TTL_MS = 60_000;           // edits to earn/redeem rates land without a restart
 async function shopCfg(shopId) {
-  if (cfgCache.has(shopId)) return cfgCache.get(shopId);
+  const hit = cfgCache.get(shopId);
+  if (hit && (Date.now() - hit.at) < CFG_TTL_MS) return hit.c;
   const r = await pool.query('SELECT * FROM shop_loyalty_config WHERE shop_id = $1', [shopId]);
   const c = r.rows[0];
-  cfgCache.set(shopId, c);
+  cfgCache.set(shopId, { c, at: Date.now() });
   return c;
+}
+
+// Tiny in-memory rate limiter (no dep) — guards the customer-lookup endpoints
+// so a leaked shop key can't enumerate the member base by phone. Per-shop
+// sliding window; fail-open on any internal hiccup.
+const rlHits = new Map();             // shopId -> [timestamps]
+function rateLimit(max, windowMs) {
+  return (req, res, next) => {
+    try {
+      const k = req.shop.shop_id;
+      const now = Date.now();
+      const arr = (rlHits.get(k) || []).filter((t) => now - t < windowMs);
+      arr.push(now);
+      rlHits.set(k, arr);
+      if (arr.length > max) return res.status(429).json({ error: 'rate_limited', message: 'Too many requests' });
+    } catch { /* fail open */ }
+    next();
+  };
 }
 const memberView = (m) => ({
   id: m.id, member_code: m.member_code, phone: m.phone, name: m.name,
@@ -132,7 +152,7 @@ app.patch('/v1/members/:id', auth, async (req, res) => {
 });
 
 // ── Lookup / balance (reveal-on-presentation) ─────────────────────────
-app.get('/v1/members/lookup', auth, async (req, res) => {
+app.get('/v1/members/lookup', auth, rateLimit(60, 60_000), async (req, res) => {
   const r = await pool.query('SELECT * FROM loyalty_members WHERE phone = $1', [digits(req.query.phone)]);
   if (!r.rows.length) return res.status(404).json({ error: 'member_not_found', message: 'No member with that phone' });
   const cfg = await shopCfg(req.shop.shop_id);
@@ -164,7 +184,9 @@ app.post('/v1/members/:id/earn', auth, async (req, res) => {
     const cfg = await shopCfg(req.shop.shop_id);
     const base = Math.round(Number(amount) * Number(cfg.earn_per_amount) + Number(units) * Number(cfg.earn_per_unit));
     const bonus = (payment_method && cfg.payment_bonus && cfg.payment_bonus[payment_method]) ? Number(cfg.payment_bonus[payment_method]) : 0;
-    const earned = base + bonus;
+    // Never let an earn go negative and drive the shared balance down — a sale
+    // reversal must go through /reverse, not a negative earn.
+    const earned = Math.max(0, base + bonus);
     const newBal = Number(mres.rows[0].points_balance) + earned;
     await client.query('UPDATE loyalty_members SET points_balance=$1 WHERE id=$2', [newBal, req.params.id]);
     const led = await client.query(
@@ -173,7 +195,16 @@ app.post('/v1/members/:id/earn', auth, async (req, res) => {
       [req.shop.shop_id, req.params.id, earned, newBal, reference || null, idempotency_key || null]);
     await client.query('COMMIT');
     res.json({ points_earned: earned, breakdown: { base, payment_bonus: bonus }, points_balance: newBal, shop: req.shop.shop_code, ledger_id: led.rows[0].id });
-  } catch (e) { await client.query('ROLLBACK'); res.status(500).json({ error: 'server_error', message: e.message }); }
+  } catch (e) {
+    await client.query('ROLLBACK');
+    // Raced a duplicate on the (shop_id, idempotency_key) unique index — the
+    // other request already applied it, so return that original result.
+    if (e.code === '23505' && idempotency_key) {
+      const dup = await pool.query('SELECT * FROM loyalty_ledger WHERE shop_id=$1 AND idempotency_key=$2', [req.shop.shop_id, idempotency_key]);
+      if (dup.rows.length) { const m = await memberById(dup.rows[0].member_id); return res.json({ points_earned: Number(dup.rows[0].points), points_balance: Number(m.points_balance), ledger_id: dup.rows[0].id, replayed: true }); }
+    }
+    res.status(500).json({ error: 'server_error', message: e.message });
+  }
   finally { client.release(); }
 });
 
@@ -208,7 +239,66 @@ app.post('/v1/members/:id/redeem', auth, async (req, res) => {
       [req.shop.shop_id, req.params.id, -pts, newBal, reference || null, idempotency_key || null]);
     await client.query('COMMIT');
     res.json({ points_redeemed: pts, value: round2(pts * Number(cfg.redeem_ratio)), points_balance: newBal, shop: req.shop.shop_code, redemption_ref: led.rows[0].id });
-  } catch (e) { await client.query('ROLLBACK'); res.status(500).json({ error: 'server_error', message: e.message }); }
+  } catch (e) {
+    await client.query('ROLLBACK');
+    if (e.code === '23505' && idempotency_key) {         // raced a duplicate — return the original redemption
+      const dup = await pool.query('SELECT * FROM loyalty_ledger WHERE shop_id=$1 AND idempotency_key=$2', [req.shop.shop_id, idempotency_key]);
+      if (dup.rows.length) { const m = await memberById(dup.rows[0].member_id); const cfg = await shopCfg(req.shop.shop_id); const p = Math.abs(Number(dup.rows[0].points)); return res.json({ points_redeemed: p, value: round2(p * cfg.redeem_ratio), points_balance: Number(m.points_balance), redemption_ref: dup.rows[0].id, replayed: true }); }
+    }
+    res.status(500).json({ error: 'server_error', message: e.message });
+  }
+  finally { client.release(); }
+});
+
+// ── Reverse (void/refund a shop's whole entry for a reference) ────────
+// A sale reversal at a shop must undo its effect on the shared wallet: give
+// back points the customer redeemed AND claw back points they earned. Reverses
+// the NET of all non-void ledger rows this shop wrote for `reference`
+// (earned +, redeemed −, bonus +) with a compensating 'void' row = −net;
+// balance floored at 0 (can't claw back points already spent elsewhere).
+// Idempotent — a second reverse for the same (shop, reference) is a no-op
+// replay, so void-then-delete of the same order won't double-reverse.
+app.post('/v1/members/:id/reverse', auth, async (req, res) => {
+  const { reference, idempotency_key } = req.body || {};
+  if (!reference) return res.status(400).json({ error: 'reference_required', message: 'reference (the shop order ref) is required' });
+  const idem = idempotency_key || `void_${reference}`;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const dup = await client.query(
+      `SELECT * FROM loyalty_ledger WHERE shop_id=$1 AND ((idempotency_key=$2) OR (type='void' AND reference=$3)) LIMIT 1`,
+      [req.shop.shop_id, idem, reference]);
+    if (dup.rows.length) {
+      await client.query('COMMIT');
+      const m = await memberById(dup.rows[0].member_id);
+      return res.json({ reversed_points: Number(dup.rows[0].points), points_balance: Number(m.points_balance), ledger_id: dup.rows[0].id, replayed: true });
+    }
+    const mres = await client.query('SELECT * FROM loyalty_members WHERE id=$1 FOR UPDATE', [req.params.id]);
+    if (!mres.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'member_not_found' }); }
+    const netRes = await client.query(
+      `SELECT COALESCE(SUM(points),0) AS net, COUNT(*) AS n FROM loyalty_ledger
+        WHERE shop_id=$1 AND member_id=$2 AND reference=$3 AND type <> 'void'`,
+      [req.shop.shop_id, req.params.id, reference]);
+    if (Number(netRes.rows[0].n) === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'nothing_to_reverse', message: 'No loyalty entries for that reference' }); }
+    const net = Number(netRes.rows[0].net);              // + = net earned, − = net redeemed
+    const bal = Number(mres.rows[0].points_balance);
+    const newBal = Math.max(0, bal - net);               // floor at 0 (can't claw back already-spent points)
+    const applied = newBal - bal;                        // the actual signed change written
+    await client.query('UPDATE loyalty_members SET points_balance=$1 WHERE id=$2', [newBal, req.params.id]);
+    const led = await client.query(
+      `INSERT INTO loyalty_ledger (shop_id,member_id,type,points,balance_after,reference,idempotency_key)
+       VALUES ($1,$2,'void',$3,$4,$5,$6) RETURNING id`,
+      [req.shop.shop_id, req.params.id, applied, newBal, reference, idem]);
+    await client.query('COMMIT');
+    res.json({ reversed_points: applied, net_before: net, points_balance: newBal, shop: req.shop.shop_code, ledger_id: led.rows[0].id });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    if (e.code === '23505') {                            // raced another reverse — return the original
+      const d = await pool.query('SELECT * FROM loyalty_ledger WHERE shop_id=$1 AND idempotency_key=$2', [req.shop.shop_id, idem]);
+      if (d.rows.length) { const m = await memberById(d.rows[0].member_id); return res.json({ reversed_points: Number(d.rows[0].points), points_balance: Number(m.points_balance), ledger_id: d.rows[0].id, replayed: true }); }
+    }
+    res.status(500).json({ error: 'server_error', message: e.message });
+  }
   finally { client.release(); }
 });
 
